@@ -3,8 +3,10 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
-    <title>AYAP-3: Multiplayer Mürettebat</title>
+    <title>AYAP-3: Global Multiplayer</title>
     <script src="https://cdn.tailwindcss.com"></script>
+    <!-- MQTT.js Kütüphanesi (Sıfır kurulum multiplayer için) -->
+    <script src="https://unpkg.com/mqtt/dist/mqtt.min.js"></script>
     <style>
         @import url('https://fonts.googleapis.com/css2?family=VT323&display=swap');
         
@@ -73,7 +75,7 @@
     <div class="w-80 panel p-4 flex flex-col side-panel z-10 border-l-0">
         <h2 class="text-2xl mb-4 text-[#33ccff] border-b border-[#33ccff] pb-2 flex items-center justify-between">
             <span>📚 R.E.H.B.E.R.</span>
-            <span class="text-sm animate-pulse">AKTİF</span>
+            <span id="connectionStatus" class="text-sm animate-pulse text-yellow-400">BAĞLANIYOR...</span>
         </h2>
         <div id="guideContent" class="text-lg leading-relaxed text-[#33ccff] whitespace-pre-wrap flex-1 overflow-y-auto pb-4"></div>
     </div>
@@ -93,14 +95,14 @@
 
     <!-- Başlangıç Ekranı (İsim Paneli) -->
     <div id="startScreen" class="absolute inset-0 bg-[#050505] z-40 flex flex-col items-center justify-center p-8 text-center crt">
-        <h1 class="text-5xl md:text-7xl mb-6 text-[#33ff33]">AYAP-3<br><span class="text-2xl md:text-4xl text-white">MULTIPLAYER SİMÜLASYON</span></h1>
-        <p class="text-xl max-w-2xl text-gray-400 mb-6 leading-relaxed">
-            Uzay gemisi "AYAP-3" otopilotta Ay'a doğru ilerliyor. Mürettebat arkadaşların seni bekliyor.<br><br>
-            Arızalar rastgele olarak geminin farklı noktalarında çıkacaktır. Hayatta kalmak için gemi kaynaklarını koru!
+        <h1 class="text-6xl md:text-8xl mb-10 text-[#33ff33] font-bold tracking-widest" style="text-shadow: 0 0 20px #33ff33;">AYAP-3</h1>
+        <p class="text-xl max-w-2xl text-gray-400 mb-8 leading-relaxed">
+            Uzay gemisi "AYAP-3" otopilotta Ay'a doğru ilerliyor.<br><br>
+            Arızaları diğer mürettebat üyeleriyle birlikte çözün. Biriniz tamir ettiğinde herkes için düzelecektir.
         </p>
-        <input type="text" id="playerNameInput" placeholder="MÜRETTEBAT İSMİ GİR" maxlength="12" class="bg-gray-900 border-4 border-[#33ff33] text-[#33ff33] p-4 text-3xl mb-6 w-80 text-center uppercase tracking-widest placeholder-green-800">
-        <button id="startGameBtn" class="bg-transparent text-[#33ff33] border-2 border-[#33ff33] hover:bg-[#33ff33] hover:text-black transition-all text-3xl py-4 px-10 cursor-pointer">OTURUMA KATIL</button>
-        <div id="loadingText" class="text-yellow-400 text-xl mt-4 hidden animate-pulse">Oturum Sunucusuna Bağlanılıyor...</div>
+        <input type="text" id="playerNameInput" placeholder="İSMİNİ GİR" maxlength="12" class="bg-gray-900 border-4 border-[#33ff33] text-[#33ff33] p-4 text-3xl mb-6 w-80 text-center uppercase tracking-widest placeholder-green-800">
+        <button id="startGameBtn" class="bg-transparent text-[#33ff33] border-2 border-[#33ff33] hover:bg-[#33ff33] hover:text-black transition-all text-3xl py-4 px-10 cursor-pointer">GEMİYE KATIL</button>
+        <div id="loadingText" class="text-yellow-400 text-xl mt-4 hidden animate-pulse">Global Odaya Bağlanılıyor...</div>
     </div>
 
     <!-- Oyun Sonu Ekranı -->
@@ -110,11 +112,7 @@
         <button id="reloadBtn" class="bg-transparent text-white border-2 border-white hover:bg-white hover:text-black transition-all text-2xl py-4 px-8 cursor-pointer">YENİDEN DENEYİN</button>
     </div>
 
-<script type="module">
-    import { initializeApp } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-app.js";
-    import { getAuth, signInAnonymously, signInWithCustomToken } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-auth.js";
-    import { getFirestore, collection, doc, setDoc, onSnapshot, updateDoc, deleteDoc, serverTimestamp } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-firestore.js";
-
+<script>
     const canvas = document.getElementById('gameCanvas');
     const ctx = canvas.getContext('2d');
     const guideContent = document.getElementById('guideContent');
@@ -136,10 +134,7 @@
 
     window.addEventListener('keydown', e => { 
         let key = e.key.toLowerCase();
-        if(keys.hasOwnProperty(key)) {
-            if(key === 'e' && !keys.e) ePressed = true;
-            keys[key] = true; 
-        }
+        if(keys.hasOwnProperty(key)) { if(key === 'e' && !keys.e) ePressed = true; keys[key] = true; }
     });
     window.addEventListener('keyup', e => { if(keys.hasOwnProperty(e.key.toLowerCase())) keys[e.key.toLowerCase()] = false; });
 
@@ -154,29 +149,21 @@
         }
     }
 
-    // --- MULTIPLAYER (Firebase) DEĞİŞKENLERİ ---
-    let auth, db, currentUserId;
-    const appId = typeof __app_id !== 'undefined' ? __app_id : 'ayap3-multiplayer';
+    // --- MQTT (Sıfır Kurulum Multiplayer) AYARLARI ---
+    let mqttClient = null;
+    const clientId = 'MURETTEBAT_' + Math.random().toString(16).substr(2, 8); // Benzersiz ID
+    const globalTopic = 'tua/ayap3/hackathon/globalroom'; // Herkes bu kanalda buluşacak
     let otherPlayers = {};
-
-    try {
-        const firebaseConfig = JSON.parse(typeof __firebase_config !== 'undefined' ? __firebase_config : '{}');
-        const app = initializeApp(firebaseConfig);
-        auth = getAuth(app);
-        db = getFirestore(app);
-    } catch(e) {
-        console.warn("Firebase config eksik. Sadece yerel (offline) simülasyon çalışacak.");
-    }
 
     // --- OYUNCU VE GEMİ VERİLERİ ---
     let stats = { hull: 100, oxy: 100, pwr: 100 };
-    const player = { name: "ANON", x: 800, y: 500, size: 28, speed: 6, color: '#3498db' };
+    const player = { name: "ANON", x: 800, y: 500, size: 28, speed: 6 };
     
     // Sürekli Akış Değişkenleri
     let activeCrisis = null;
-    let nextCrisisTimer = 60 * 5; // İlk girişten 5 saniye sonra arıza başlasın
+    let nextCrisisTimer = 60 * 5; 
     let isPeaceTime = false;
-    let solvedInCycle = 0; // O döngüde çözülen arıza sayısı
+    let solvedInCycle = 0; 
 
     const walkableAreas = [
         {x: 400, y: 150, w: 800, h: 760}, {x: 50, y: 50, w: 400, h: 250}, {x: 50, y: 350, w: 350, h: 250}, 
@@ -196,68 +183,90 @@
     }
 
     const crisisScenarios = [
-        { roomId: 'appenzeller', name: "HAVALANDIRMA TIKANDI", desc: "Sol üstteki Havalandırma Modülüne koş! Filtreleri temizle.", drain: {pwr: 0, hull: 0, oxy: 0.15} },
-        { roomId: 'ispenc', name: "MOTOR HARARETİ", desc: "Sol alttaki Motor Odası'na git! Reaktörü acilen soğut.", drain: {pwr: 0.1, hull: 0.05, oxy: 0} },
-        { roomId: 'habes', name: "SENSÖR KÖRLÜĞÜ", desc: "Sağ üstteki Kokpit'e git! Yıldız izleyiciyi manuel ayarla.", drain: {pwr: 0, hull: 0.1, oxy: 0} },
-        { roomId: 'zibrit', name: "İLETİŞİM KOPTU", desc: "Sağ alttaki İletişim Odası'na koş! Frekans sinyalini bul.", drain: {pwr: 0.15, hull: 0, oxy: 0} }
+        { roomId: 'appenzeller', name: "HAVALANDIRMA TIKANDI", desc: "Havalandırma Modülüne koş! Filtreleri temizle.", drain: {pwr: 0, hull: 0, oxy: 0.15} },
+        { roomId: 'ispenc', name: "MOTOR HARARETİ", desc: "Motor Odası'na git! Reaktörü acilen soğut.", drain: {pwr: 0.1, hull: 0.05, oxy: 0} },
+        { roomId: 'habes', name: "SENSÖR KÖRLÜĞÜ", desc: "Kokpit'e git! Yıldız izleyiciyi manuel ayarla.", drain: {pwr: 0, hull: 0.1, oxy: 0} },
+        { roomId: 'zibrit', name: "İLETİŞİM KOPTU", desc: "İletişim Odası'na koş! Frekans sinyalini bul.", drain: {pwr: 0.15, hull: 0, oxy: 0} }
     ];
 
-    // --- OYUN BAŞLATMA VE MULTIPLAYER BAĞLANTISI ---
-    document.getElementById('startGameBtn').addEventListener('click', async () => {
+    // --- OYUN BAŞLATMA VE MQTT BAĞLANTISI ---
+    document.getElementById('startGameBtn').addEventListener('click', () => {
         const nameInput = document.getElementById('playerNameInput').value.trim();
-        player.name = nameInput === "" ? "MÜRETTEBAT_" + Math.floor(Math.random()*99) : nameInput;
+        player.name = nameInput === "" ? "MÜRETTEBAT" : nameInput;
         
         document.getElementById('startGameBtn').style.display = 'none';
         document.getElementById('loadingText').classList.remove('hidden');
 
-        // Firebase Auth ve Sync Başlatma
-        if (auth && db) {
-            try {
-                if (typeof __initial_auth_token !== 'undefined' && __initial_auth_token) {
-                    await signInWithCustomToken(auth, __initial_auth_token);
-                } else {
-                    await signInAnonymously(auth);
+        // HiveMQ Public Broker Bağlantısı
+        mqttClient = mqtt.connect('wss://broker.hivemq.com:8884/mqtt');
+
+        mqttClient.on('connect', () => {
+            document.getElementById('connectionStatus').innerText = "BAĞLI (GLOBAL)";
+            document.getElementById('connectionStatus').className = "text-sm text-green-400";
+            
+            // Global odaya abone ol
+            mqttClient.subscribe(globalTopic);
+            
+            // Oyuna giriş yaptı!
+            document.getElementById('startScreen').classList.add('hidden');
+            document.getElementById('statsPanel').style.display = 'flex';
+            guideContent.innerHTML = `SİSTEM BAŞLATILDI...\nOtopilot devrede. Rota: Ay Yörüngesi.\n\nHoş geldin, ${player.name}.\nDiğer mürettebat üyeleriyle senkronize edildin.\n\nGörevlerin:\n1. Gemi içinde devriye at.\n2. Arıza çıktığında odaya koş ve [E] ile tamir et.\n3. Sen tamir edersen herkes için çözülür!`;
+            
+            gameState = 'PLAYING';
+            requestAnimationFrame(gameLoop);
+
+            // Konumu sürekli global odaya gönder (Saniyede 10 kez)
+            setInterval(() => {
+                if (gameState === 'PLAYING' || gameState === 'MINIGAME') {
+                    mqttClient.publish(globalTopic, JSON.stringify({
+                        type: 'POS', id: clientId, name: player.name, x: Math.floor(player.x), y: Math.floor(player.y)
+                    }));
                 }
-                currentUserId = auth.currentUser.uid;
                 
-                // Oyuncuyu veri tabanına yaz
-                await setDoc(doc(db, 'artifacts', appId, 'public', 'data', 'players', currentUserId), {
-                    name: player.name, x: player.x, y: player.y, lastSeen: serverTimestamp()
-                });
+                // Bağlantısı kopan (2 saniyeden uzun süredir veri yollamayan) oyuncuları sil
+                const now = Date.now();
+                for (let id in otherPlayers) {
+                    if (now - otherPlayers[id].lastSeen > 2000) delete otherPlayers[id];
+                }
+            }, 100);
+        });
 
-                // Diğer oyuncuları dinle
-                const playersRef = collection(db, 'artifacts', appId, 'public', 'data', 'players');
-                onSnapshot(playersRef, (snapshot) => {
-                    otherPlayers = {};
-                    snapshot.forEach(docSnap => {
-                        if (docSnap.id !== currentUserId) {
-                            otherPlayers[docSnap.id] = docSnap.data();
-                        }
-                    });
-                }, (error) => { console.error("Firebase Sync Error", error); });
+        // Diğer oyunculardan gelen mesajları dinle
+        mqttClient.on('message', (topic, message) => {
+            try {
+                const data = JSON.parse(message.toString());
+                if (data.id === clientId) return; // Kendi mesajımızı yoksay
 
-                // Pozisyonumu sürekli güncelle (100ms)
-                setInterval(() => {
-                    if (gameState === 'PLAYING' || gameState === 'MINIGAME') {
-                        updateDoc(doc(db, 'artifacts', appId, 'public', 'data', 'players', currentUserId), {
-                            x: player.x, y: player.y, lastSeen: serverTimestamp()
-                        }).catch(e => {}); 
+                if (data.type === 'POS') {
+                    // Diğer oyuncunun konumunu güncelle
+                    otherPlayers[data.id] = { name: data.name, x: data.x, y: data.y, lastSeen: Date.now() };
+                } 
+                else if (data.type === 'SPAWN_CRISIS') {
+                    // Biri kriz başlattı, bizde de aynı kriz başlasın!
+                    if (!activeCrisis && !isPeaceTime) {
+                        activeCrisis = { ...crisisScenarios[data.crisisIndex] };
+                        guideContent.innerHTML += `\n\n<span class='text-red-500 font-bold'>[ACİL ALARM] ${activeCrisis.name}\n${activeCrisis.desc}</span>`;
+                        guideContent.scrollTop = guideContent.scrollHeight;
+                        nextCrisisTimer = 60 * 15; // Kriz varken süre saymasını engellemek için ileri at
                     }
-                }, 100);
-
-                window.addEventListener('beforeunload', () => {
-                    deleteDoc(doc(db, 'artifacts', appId, 'public', 'data', 'players', currentUserId));
-                });
-            } catch (err) { console.error("Bağlantı Hatası:", err); }
-        }
-
-        // Oyun Ekranını Aç
-        document.getElementById('startScreen').classList.add('hidden');
-        document.getElementById('statsPanel').style.display = 'flex';
-        guideContent.innerHTML = "SİSTEM BAŞLATILDI...\nOtopilot devrede. Rota: Ay Yörüngesi.\n\nHoş geldin, " + player.name + ".\nGörevlerin:\n1. Gemi içinde (W,A,S,D) devriye at.\n2. Arıza çıktığında ilgili odaya koş ve [E] ile tamir et.\n3. Kaynakların sıfırlanmasına izin verme.";
-        
-        gameState = 'PLAYING';
-        requestAnimationFrame(gameLoop);
+                }
+                else if (data.type === 'RESOLVE_CRISIS') {
+                    // Başka bir oyuncu krizi çözdü!
+                    if (activeCrisis && activeCrisis.roomId === data.roomId) {
+                        if (minigameInterval) { clearInterval(minigameInterval); stopMinigameAudio(); }
+                        document.getElementById('minigameOverlay').classList.add('hidden');
+                        gameState = 'PLAYING';
+                        
+                        activeCrisis = null; 
+                        solvedInCycle++; 
+                        
+                        guideContent.innerHTML += `\n\n<span class='text-[#33ccff] font-bold'>[BAŞARILI] ${data.name} arızayı giderdi! Sistem normale dönüyor.</span>`;
+                        
+                        checkCycleCompletion();
+                    }
+                }
+            } catch (e) {}
+        });
     });
 
     document.getElementById('reloadBtn').addEventListener('click', () => { location.reload(); });
@@ -311,7 +320,7 @@
                 dust.className = 'absolute bg-gray-600 rounded-full cursor-pointer hover:bg-gray-400 transition-colors border-2 border-gray-400';
                 dust.style.width = (Math.random()*20 + 20) + 'px'; dust.style.height = (Math.random()*20 + 20) + 'px';
                 dust.style.left = (Math.random()*80 + 10) + '%'; dust.style.top = (Math.random()*80 + 10) + '%';
-                dust.onmousedown = dust.ontouchstart = function(e) { e.preventDefault(); this.remove(); dustCount--; if(dustCount <= 0) completeMinigame(); };
+                dust.onmousedown = dust.ontouchstart = function(e) { e.preventDefault(); this.remove(); dustCount--; if(dustCount <= 0) completeMinigame(roomType); };
                 area.appendChild(dust);
             }
         } 
@@ -327,7 +336,7 @@
                 document.getElementById('heatBarMinigame').className = `h-full transition-all duration-100 ${heat > 70 ? 'bg-red-600' : (heat > 30 ? 'bg-yellow-500' : 'bg-blue-500')}`;
             }, 100);
             let coolBtn = document.getElementById('coolBtn');
-            coolBtn.onmousedown = coolBtn.ontouchstart = function(e) { e.preventDefault(); heat -= 15; if(heat <= 0) { clearInterval(minigameInterval); completeMinigame(); } };
+            coolBtn.onmousedown = coolBtn.ontouchstart = function(e) { e.preventDefault(); heat -= 15; if(heat <= 0) { clearInterval(minigameInterval); completeMinigame(roomType); } };
         }
         else if (roomType === 'zibrit') {
             document.getElementById('minigameTitle').innerText = "RADYO FREKANSI SENKRONİZASYONU";
@@ -358,7 +367,7 @@
             let syncBtn = document.getElementById('syncBtn');
             syncBtn.onclick = syncBtn.ontouchstart = function(e) {
                 e.preventDefault(); let distance = Math.abs(sliderVal - targetCenter);
-                if (distance <= 15) { completeMinigame(); } else { currentTxt.classList.add('text-red-500'); setTimeout(() => currentTxt.classList.remove('text-red-500'), 300); }
+                if (distance <= 15) { completeMinigame(roomType); } else { currentTxt.classList.add('text-red-500'); setTimeout(() => currentTxt.classList.remove('text-red-500'), 300); }
             };
         }
         else if (roomType === 'habes') {
@@ -372,7 +381,7 @@
                 star.style.width = '50px'; star.style.height = '50px'; star.style.left = (Math.random()*70 + 15) + '%'; star.style.top = (Math.random()*60 + 20) + '%'; star.innerText = i;
                 star.onmousedown = star.ontouchstart = function(e) {
                     e.preventDefault();
-                    if(i === currentTarget) { this.style.backgroundColor = '#33ff33'; this.style.boxShadow = '0 0 20px #33ff33'; currentTarget++; if(currentTarget > 4) completeMinigame(); }
+                    if(i === currentTarget) { this.style.backgroundColor = '#33ff33'; this.style.boxShadow = '0 0 20px #33ff33'; currentTarget++; if(currentTarget > 4) completeMinigame(roomType); }
                     else { this.style.backgroundColor = '#ff3333'; setTimeout(() => this.style.backgroundColor = '#ffffff', 300); }
                 };
                 area.appendChild(star);
@@ -380,32 +389,25 @@
         }
     }
 
-    function completeMinigame() {
+    function completeMinigame(roomId) {
         if(minigameInterval) clearInterval(minigameInterval);
         stopMinigameAudio(); 
         document.getElementById('minigameOverlay').classList.add('hidden');
-        guideContent.innerHTML += `\n\n<span class='text-green-400'>[ONARILDI] ${activeCrisis.name} başarıyla çözüldü!</span>`;
+        
+        // Diğer oyunculara krizi çözdüğümüzü bildir
+        if(mqttClient) {
+            mqttClient.publish(globalTopic, JSON.stringify({
+                type: 'RESOLVE_CRISIS', id: clientId, name: player.name, roomId: roomId
+            }));
+        }
+
+        guideContent.innerHTML += `\n\n<span class='text-green-400 font-bold'>[ONARILDI] ${activeCrisis.name} başarıyla tarafınızdan çözüldü!</span>`;
         
         activeCrisis = null; 
         solvedInCycle++; 
         gameState = 'PLAYING';
         
-        // Bütün Görevler Tamamlanma Kontrolü (Sonsuz Döngü)
-        if (solvedInCycle >= 4) {
-            isPeaceTime = true;
-            solvedInCycle = 0;
-            // Sağ panele bilgi ver
-            guideContent.innerHTML += `\n\n<span class='text-[#33ccff] font-bold text-xl'>\n=== BİLGİ RAPORU ===\nGörevler tamamlandı. Sorunsuz şekilde Ay'a ilerleniyor....</span>`;
-            guideContent.scrollTop = guideContent.scrollHeight;
-            // Uzun bir dinlenme süresi (Örn: 15 Saniye)
-            nextCrisisTimer = 60 * 15; 
-        } else {
-            // Rastgele süre ile yeni kriz beklemesi (Örn: 5 ile 20 Saniye arası)
-            let randomSeconds = Math.floor(Math.random() * 15) + 5;
-            nextCrisisTimer = 60 * randomSeconds; 
-            // guideContent.innerHTML += `\n<span class='text-gray-400'>(${randomSeconds} saniye sonra sonraki analiz yapılacak...)</span>`;
-        }
-        guideContent.scrollTop = guideContent.scrollHeight;
+        checkCycleCompletion();
     }
 
     function cancelMinigame() {
@@ -413,6 +415,20 @@
         stopMinigameAudio(); 
         document.getElementById('minigameOverlay').classList.add('hidden');
         gameState = 'PLAYING';
+    }
+
+    function checkCycleCompletion() {
+        if (solvedInCycle >= 4) {
+            isPeaceTime = true;
+            solvedInCycle = 0;
+            guideContent.innerHTML += `\n\n<span class='text-[#33ccff] font-bold text-xl'>\n=== BİLGİ RAPORU ===\nGörevler tamamlandı. Sorunsuz şekilde Ay'a ilerleniyor....</span>`;
+            guideContent.scrollTop = guideContent.scrollHeight;
+            nextCrisisTimer = 60 * 15; // 15 Saniye sessizlik
+        } else {
+            let randomSeconds = Math.floor(Math.random() * 10) + 5;
+            nextCrisisTimer = 60 * randomSeconds; 
+        }
+        guideContent.scrollTop = guideContent.scrollHeight;
     }
 
     // --- GEMİ GÜNCELLEMESİ (Sürekli Akış) ---
@@ -433,9 +449,8 @@
             nextCrisisTimer--;
             if (nextCrisisTimer <= 0) {
                 if (isPeaceTime) {
-                    // Dinlenme bitti, yeniden arıza çıkar
                     isPeaceTime = false;
-                    nextCrisisTimer = 60 * (Math.floor(Math.random() * 5) + 3); // 3-8 saniye sonra ilk kriz
+                    nextCrisisTimer = 60 * (Math.floor(Math.random() * 5) + 3); 
                     guideContent.innerHTML += `\n\n<span class='text-yellow-400'>[DİKKAT] Yeni anomaliler tespit ediliyor. Lütfen hazırda bekleyin...</span>`;
                     guideContent.scrollTop = guideContent.scrollHeight;
                 } else {
@@ -444,6 +459,7 @@
             }
             document.getElementById('interactionPrompt').classList.add('hidden');
         } else {
+            // Kaynaklar azalır
             stats.hull -= activeCrisis.drain.hull;
             stats.oxy -= activeCrisis.drain.oxy;
             stats.pwr -= activeCrisis.drain.pwr;
@@ -467,9 +483,16 @@
     }
 
     function spawnCrisis() {
-        // Rastgele bir arıza seç (Ardışık olmasın diye rastgelelik eklendi)
         let randomIndex = Math.floor(Math.random() * crisisScenarios.length);
         activeCrisis = { ...crisisScenarios[randomIndex] };
+        
+        // Krizi bulduğumuzda global odaya bildir ki herkeste aynı kriz çıksın
+        if(mqttClient) {
+            mqttClient.publish(globalTopic, JSON.stringify({
+                type: 'SPAWN_CRISIS', id: clientId, crisisIndex: randomIndex
+            }));
+        }
+
         guideContent.innerHTML += `\n\n<span class='text-red-500 font-bold'>[ACİL ALARM] ${activeCrisis.name}\n${activeCrisis.desc}</span>`;
         guideContent.scrollTop = guideContent.scrollHeight;
     }
