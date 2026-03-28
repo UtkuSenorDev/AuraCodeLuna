@@ -77,6 +77,15 @@
             <span>📚 R.E.H.B.E.R.</span>
             <span id="connectionStatus" class="text-sm animate-pulse text-yellow-400">BAĞLANIYOR...</span>
         </h2>
+        
+        <!-- YENİ: MÜRETTEBAT LİSTESİ -->
+        <div class="mb-2 border-b border-[#33ccff]/30 pb-2">
+            <h3 class="text-lg text-[#33ff33] mb-1">MÜRETTEBAT LİSTESİ</h3>
+            <ul id="playerListUI" class="text-sm text-gray-300 space-y-1">
+                <li class="text-gray-500">Bekleniyor...</li>
+            </ul>
+        </div>
+
         <div id="guideContent" class="text-lg leading-relaxed text-[#33ccff] whitespace-pre-wrap flex-1 overflow-y-auto pb-4"></div>
     </div>
 
@@ -162,6 +171,7 @@
     // Sürekli Akış Değişkenleri
     let activeCrisis = null;
     let nextCrisisTimer = 60 * 5; 
+    let crisisGraceTimer = 0; // Kriz başladıktan sonra hasar almadan önceki süre
     let isPeaceTime = false;
     let solvedInCycle = 0; 
 
@@ -215,7 +225,7 @@
             gameState = 'PLAYING';
             requestAnimationFrame(gameLoop);
 
-            // Konumu sürekli global odaya gönder (Saniyede 10 kez)
+            // Konumu sürekli global odaya gönder ve MÜRETTEBAT LİSTESİNİ güncelle
             setInterval(() => {
                 if (gameState === 'PLAYING' || gameState === 'MINIGAME') {
                     mqttClient.publish(globalTopic, JSON.stringify({
@@ -228,6 +238,16 @@
                 for (let id in otherPlayers) {
                     if (now - otherPlayers[id].lastSeen > 2000) delete otherPlayers[id];
                 }
+
+                // Mürettebat Listesi Arayüzünü Güncelle
+                if (gameState === 'PLAYING' || gameState === 'MINIGAME') {
+                    let listHTML = `<li class="text-[#3498db]">> ${player.name} (Sen)</li>`;
+                    Object.values(otherPlayers).forEach(p => {
+                        listHTML += `<li class="text-[#e74c3c]">> ${p.name}</li>`;
+                    });
+                    document.getElementById('playerListUI').innerHTML = listHTML;
+                }
+
             }, 100);
         });
 
@@ -245,7 +265,8 @@
                     // Biri kriz başlattı, bizde de aynı kriz başlasın!
                     if (!activeCrisis && !isPeaceTime) {
                         activeCrisis = { ...crisisScenarios[data.crisisIndex] };
-                        guideContent.innerHTML += `\n\n<span class='text-red-500 font-bold'>[ACİL ALARM] ${activeCrisis.name}\n${activeCrisis.desc}</span>`;
+                        crisisGraceTimer = 60 * 22; // Başkasından gelse bile 22 saniye ver
+                        guideContent.innerHTML += `\n\n<span class='text-red-500 font-bold'>[ACİL ALARM] ${activeCrisis.name}\n${activeCrisis.desc}\n(Kaynak kaybı 22 saniye içinde başlayacak)</span>`;
                         guideContent.scrollTop = guideContent.scrollHeight;
                         nextCrisisTimer = 60 * 15; // Kriz varken süre saymasını engellemek için ileri at
                     }
@@ -459,16 +480,20 @@
             }
             document.getElementById('interactionPrompt').classList.add('hidden');
         } else {
-            // Kaynaklar azalır
-            stats.hull -= activeCrisis.drain.hull;
-            stats.oxy -= activeCrisis.drain.oxy;
-            stats.pwr -= activeCrisis.drain.pwr;
-            updateStatsUI();
+            // Süre (Grace Period) dolduysa kaynaklar azalır
+            if (crisisGraceTimer > 0) {
+                crisisGraceTimer--;
+            } else {
+                stats.hull -= activeCrisis.drain.hull;
+                stats.oxy -= activeCrisis.drain.oxy;
+                stats.pwr -= activeCrisis.drain.pwr;
+                updateStatsUI();
 
-            if (stats.hull <= 0 || stats.oxy <= 0 || stats.pwr <= 0) {
-                gameState = 'GAMEOVER';
-                document.getElementById('endScreen').classList.remove('hidden');
-                return;
+                if (stats.hull <= 0 || stats.oxy <= 0 || stats.pwr <= 0) {
+                    gameState = 'GAMEOVER';
+                    document.getElementById('endScreen').classList.remove('hidden');
+                    return;
+                }
             }
 
             let targetRoom = rooms.find(r => r.id === activeCrisis.roomId);
@@ -486,6 +511,9 @@
         let randomIndex = Math.floor(Math.random() * crisisScenarios.length);
         activeCrisis = { ...crisisScenarios[randomIndex] };
         
+        // 22 saniye (60 fps) müdahale süresi tanı
+        crisisGraceTimer = 60 * 22; 
+        
         // Krizi bulduğumuzda global odaya bildir ki herkeste aynı kriz çıksın
         if(mqttClient) {
             mqttClient.publish(globalTopic, JSON.stringify({
@@ -493,7 +521,7 @@
             }));
         }
 
-        guideContent.innerHTML += `\n\n<span class='text-red-500 font-bold'>[ACİL ALARM] ${activeCrisis.name}\n${activeCrisis.desc}</span>`;
+        guideContent.innerHTML += `\n\n<span class='text-red-500 font-bold'>[ACİL ALARM] ${activeCrisis.name}\n${activeCrisis.desc}\n(Kaynak kaybı 22 sn. içinde başlayacak)</span>`;
         guideContent.scrollTop = guideContent.scrollHeight;
     }
 
